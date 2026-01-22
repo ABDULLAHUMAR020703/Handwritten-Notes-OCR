@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Node
+node_modules/
+.next/
+out/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+uploads/
+outputs/
+*.docx
+*.doc
+
+# Test files (optional - remove if you want to track test images)
+# *.jpeg
+# *.jpg
+# *.png
