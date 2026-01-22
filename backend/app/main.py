@@ -6,24 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Load environment variables from .env file
-try:
-    from dotenv import load_dotenv
-    # Load .env file from backend directory
-    env_path = Path(__file__).parent.parent / '.env'
-    load_dotenv(env_path)
-    logger_env = logging.getLogger(__name__)
-    logger_env.info(f"✅ Loaded environment variables from: {env_path}")
-except ImportError:
-    # python-dotenv not installed - skip .env loading
-    pass
-except Exception as e:
-    # .env file not found or error loading - continue without it
-    pass
-
-from app.api import convert, upload, download
-
-# Configure logging with detailed format
+# Configure logging with detailed format - MUST BE BEFORE OTHER IMPORTS
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
@@ -32,6 +15,73 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+logger = logging.getLogger(__name__)
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    # Load .env file from backend directory
+    env_path = Path(__file__).parent.parent / '.env'
+    
+    # Try loading with default encoding (usually utf-8)
+    try:
+        load_dotenv(env_path, encoding='utf-8')
+        logger.info(f"✅ Loaded environment variables from: {env_path}")
+    except UnicodeDecodeError:
+        logger.warning(f"⚠️  UTF-8 decode failed for .env, trying utf-16...")
+        try:
+            load_dotenv(env_path, encoding='utf-16')
+            logger.info(f"✅ Loaded environment variables (utf-16) from: {env_path}")
+        except Exception:
+            logger.warning(f"⚠️  UTF-16 decode failed for .env, trying latin-1...")
+            load_dotenv(env_path, encoding='latin-1')
+            logger.info(f"✅ Loaded environment variables (latin-1) from: {env_path}")
+    except Exception as e:
+        if "null character" in str(e):
+            logger.warning(f"⚠️  Detected null characters in .env (likely UTF-16), trying utf-16...")
+            load_dotenv(env_path, encoding='utf-16')
+            logger.info(f"✅ Loaded environment variables (utf-16) from: {env_path}")
+        else:
+            raise e
+    
+    # DEBUG: Check if ALIBABA_API_KEY is loaded
+    import os
+    api_key = os.getenv('ALIBABA_API_KEY')
+    if api_key:
+        logger.info(f"✅ ALIBABA_API_KEY found: {api_key[:4]}...{api_key[-4:]}")
+    else:
+        logger.error(f"❌ ALIBABA_API_KEY NOT FOUND in environment variables")
+        logger.error(f"   Current working directory: {os.getcwd()}")
+        logger.error(f"   .env path exists: {env_path.exists()}")
+        if env_path.exists():
+            # Try reading with utf-8, fallback to utf-16, then latin-1
+            try:
+                with open(env_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                try:
+                    with open(env_path, 'r', encoding='utf-16') as f:
+                        content = f.read()
+                except UnicodeError:
+                    with open(env_path, 'r', encoding='latin-1') as f:
+                        content = f.read()
+            
+            logger.info(f"   .env content length: {len(content)}")
+            if 'ALIBABA_API_KEY' in content:
+                logger.info(f"   'ALIBABA_API_KEY' string found in .env file")
+            else:
+                logger.error(f"   'ALIBABA_API_KEY' string NOT found in .env file")
+except ImportError:
+    # python-dotenv not installed - skip .env loading
+    logger.warning("⚠️  python-dotenv not installed - .env file will NOT be loaded")
+    pass
+except Exception as e:
+    # .env file not found or error loading - continue without it
+    logger.error(f"❌ Error loading .env file: {e}")
+    pass
+
+from app.api import convert, upload, download
 
 logger = logging.getLogger(__name__)
 
