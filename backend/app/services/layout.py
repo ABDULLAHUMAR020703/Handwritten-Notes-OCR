@@ -184,6 +184,31 @@ def _detect_diagram_regions(gray: np.ndarray, text_regions: List[Dict]) -> List[
             x1, y1 = x, y
             x2, y2 = x + w_rect, y + h_rect
             
+            # CRITICAL: Filter out page background
+            # The background will be a very large component that touches the edges
+            is_background = False
+            
+            # Check 1: Area too large (> 90% of image) - Relaxed from 50%
+            if area > (w * h) * 0.90:
+                is_background = True
+                logger.debug(f"   Skipping potential diagram (too large, likely background: {area/(w*h)*100:.1f}%)")
+            
+            # Check 2: Touches multiple edges (likely margins/background)
+            edges_touched = 0
+            margin = 5  # pixels
+            if x < margin: edges_touched += 1
+            if y < margin: edges_touched += 1
+            if x + w_rect > w - margin: edges_touched += 1
+            if y + h_rect > h - margin: edges_touched += 1
+            
+            # Relaxed: Only filter if touching 3 or more edges (almost full page)
+            if edges_touched >= 3:
+                is_background = True
+                logger.debug(f"   Skipping potential diagram (touches {edges_touched} edges, likely background)")
+                
+            if is_background:
+                continue
+            
             # Avoid very elongated regions (likely margins/gaps)
             aspect_ratio = w_rect / h_rect if h_rect > 0 else 0
             
@@ -217,6 +242,7 @@ def _detect_diagram_regions(gray: np.ndarray, text_regions: List[Dict]) -> List[
                 # Only add as diagram if NO characters detected
                 if not has_characters:
                     diagram_regions.append({
+                        'type': 'diagram',  # Explicitly set type
                         'bbox': (x1, y1, x2, y2),
                         'area': area,
                         'aspect_ratio': aspect_ratio,
@@ -263,6 +289,11 @@ def _classify_regions(regions: List[Dict], gray: np.ndarray, img: np.ndarray) ->
     for region in regions:
         x1, y1, x2, y2 = region['bbox']
         
+        # CRITICAL: If region is already classified as diagram (by _detect_diagram_regions), preserve it
+        if region.get('type') == 'diagram':
+            classified.append(region)
+            continue
+            
         # Extract region properties
         region_height = region['height']
         region_width = region['width']
@@ -327,21 +358,36 @@ def _classify_regions(regions: List[Dict], gray: np.ndarray, img: np.ndarray) ->
         
         # Much stricter thresholds for diagram classification
         is_diagram = False
-        if not has_readable_characters:  # CRITICAL: Only if NO characters detected
-            # Very strict criteria - only large, square-ish regions with very low text density
-            is_diagram = (
-                area > (w * h) * 0.10 and  # Much larger threshold (10% instead of 5%)
-                0.7 < aspect_ratio < 1.5 and  # Very square (not elongated)
-                compactness < 0.15 and  # Very low text density (was 0.3)
-                text_density < 0.1  # Additional check: very low text density
-            )
-            
-            if is_diagram:
-                logger.debug(f"   Classified as diagram (no characters, area={area/(w*h)*100:.1f}%, compactness={compactness:.2f})")
         
-        # If in doubt, treat as TEXT (not diagram)
-        if has_readable_characters:
-            is_diagram = False  # Force text if characters detected
+        # Check for diagram characteristics regardless of text content
+        # Diagrams often have text labels, so we shouldn't disqualify them just because of text
+        # But they should have LOW text density compared to a paragraph
+        
+        # Criteria 1: No characters (pure drawing/image)
+        if not has_readable_characters:
+            is_diagram = (
+                area > (w * h) * 0.05 and  # Relaxed from 10%
+                0.5 < aspect_ratio < 2.0 and  # Square-ish
+                compactness < 0.3
+            )
+        
+        # Criteria 2: Has characters but very low density (labeled diagram)
+        elif has_readable_characters:
+            # Relaxed thresholds significantly to catch complex diagrams
+            is_diagram = (
+                area > (w * h) * 0.05 and  # Relaxed size (5%)
+                0.3 < aspect_ratio < 3.0 and  # Allow wider/taller diagrams
+                text_density < 0.5 and  # Allow more density (lines/shapes count as density)
+                compactness < 0.5       # Allow more filled area
+            )
+            if is_diagram:
+                logger.debug(f"   Classified as labeled diagram (density={text_density:.2f}, compactness={compactness:.2f})")
+        
+        if is_diagram:
+            region['type'] = 'diagram'
+        else:
+            # Force text if not a diagram
+            pass
         
         if is_diagram:
             region['type'] = 'diagram'
@@ -384,6 +430,13 @@ def _classify_regions(regions: List[Dict], gray: np.ndarray, img: np.ndarray) ->
                 region['type'] = 'equation'
             else:
                 region['type'] = 'paragraph'
+            
+        # FORCE DIAGRAM HEURISTIC:
+        # If a region is large (> 15% of page) and NOT extremely dense text, it's likely a diagram/chart
+        # This overrides previous classification
+        if area > (w * h) * 0.15 and text_density < 0.8:
+             region['type'] = 'diagram'
+             logger.debug(f"   FORCE DIAGRAM: Large region ({area/(w*h)*100:.1f}%) classified as diagram")
         
         classified.append(region)
     

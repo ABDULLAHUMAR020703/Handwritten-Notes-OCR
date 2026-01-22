@@ -100,13 +100,21 @@ class DOCXGenerator:
             elif element_type == 'diagram':
                 # Insert cropped diagram as image
                 image_path = element.get('image_path')
-                if image_path and Path(image_path).exists():
-                    self._add_diagram(doc, Path(image_path))
-                    logger.debug(f"   [{idx+1}/{len(structured_json)}] Added diagram image: {image_path}")
+                logger.info(f"   🖼️  Processing diagram element: {image_path}")
+                
+                if image_path:
+                    path_obj = Path(image_path)
+                    if path_obj.exists():
+                        logger.info(f"   ✅ Diagram file exists: {path_obj.absolute()}")
+                        self._add_diagram(doc, path_obj)
+                        logger.debug(f"   [{idx+1}/{len(structured_json)}] Added diagram image: {image_path}")
+                    else:
+                        logger.warning(f"   ❌ Diagram file NOT found: {path_obj.absolute()}")
+                        # Fallback: add placeholder text
+                        doc.add_paragraph('[Diagram - Image file not found]')
                 else:
-                    # Fallback: add placeholder text
-                    doc.add_paragraph('[Diagram - Image not available]')
-                    logger.debug(f"   [{idx+1}/{len(structured_json)}] Added diagram placeholder (no image)")
+                    logger.warning(f"   ⚠️  Diagram element missing image_path")
+                    doc.add_paragraph('[Diagram - Missing path]')
             
             # Add spacing between elements (but not excessive)
             if element_type == 'heading':

@@ -19,7 +19,7 @@ from app.services.layout import detect_layout
 from app.services.text_ocr import TextOCR
 from app.services.math_ocr import MathOCR
 from app.services.gemini_ocr import get_gemini_cleanup
-from app.services.smart_gemini_ocr import get_smart_gemini_ocr  # Primary OCR
+from app.services.qwen_vl_ocr import get_qwen_vl_ocr  # Primary OCR (Qwen-VL-OCR)
 from app.services.text_fusion import TextFusion
 from app.services.document_builder import DocumentBuilder
 from app.services.docx_generator import DOCXGenerator
@@ -37,9 +37,9 @@ router = APIRouter()
 # ============================================================
 # CONFIGURATION FLAGS
 # ============================================================
-# Use Smart Gemini Vision OCR as primary method (direct image-to-text with diagram detection)
-# Falls back to traditional OCR (PaddleOCR/EasyOCR) if Gemini fails
-USE_SMART_GEMINI_OCR = True  # Set to False to always use traditional OCR
+# Use Qwen-VL-OCR as PRIMARY and EXCLUSIVE OCR engine
+# NO FALLBACK: If Qwen-VL-OCR fails, processing HALTS with error
+USE_QWEN_VL_OCR = True  # Primary and exclusive OCR - no silent fallback
 
 # Initialize services (singleton pattern)
 _text_ocr = None
@@ -252,58 +252,84 @@ async def process_single_image(
                 }
         
         # ============================================================
-        # OCR EXTRACTION - Smart Gemini Vision OCR (Primary) with Traditional Fallback
+        # OCR EXTRACTION - Qwen-VL-OCR (Primary and Exclusive)
+        # NO FALLBACK: If Qwen-VL-OCR fails, processing HALTS
         # ============================================================
-        logger.info(f"   🔍 Starting OCR extraction...")
+        logger.info(f"   🔍 Starting OCR extraction (Qwen-VL-OCR)...")
         final_text = ""
         diagram_regions = []
         structured_json = []
-        use_gemini = False
+        use_qwen_ocr = False
         
-        # TRY 1: Smart Gemini Vision OCR (direct image-to-text with structure preservation)
-        if USE_SMART_GEMINI_OCR:
+        # PRIMARY: Qwen-VL-OCR (exclusive OCR engine)
+        if USE_QWEN_VL_OCR:
             try:
-                smart_gemini = get_smart_gemini_ocr()
-                if smart_gemini.available:
-                    logger.info(f"   🔮 Using Smart Gemini Vision OCR (primary method)...")
-                    
-                    # Get image dimensions for diagram position estimation
-                    h, w = processed_image.shape[:2]
-                    
-                    # Extract text with diagram detection
-                    final_text, diagram_regions = smart_gemini.extract_text_from_image(
-                        processed_image_path,
-                        image_width=w,
-                        image_height=h
-                    )
-                    
-                    if final_text and final_text.strip():
-                        use_gemini = True
-                        logger.info(f"   ✅ Smart Gemini OCR extracted {len(final_text)} characters")
-                        if diagram_regions:
-                            logger.info(f"   📊 Detected {len(diagram_regions)} diagram regions")
-                    else:
-                        logger.warning(f"   ⚠️  Smart Gemini OCR returned empty, trying fallback...")
-                        final_text = ""
+                qwen_ocr = get_qwen_vl_ocr()
+                if not qwen_ocr.available:
+                    # CRITICAL: Qwen-VL-OCR is required - HALT processing
+                    error_msg = qwen_ocr.initialization_error or "Qwen-VL-OCR is not available"
+                    logger.error(f"   ❌ CRITICAL: {error_msg}")
+                    raise RuntimeError(f"OCR HALTED: {error_msg}")
+                
+                logger.info(f"   🔮 Using Qwen-VL-OCR (primary and exclusive OCR)...")
+                
+                # Get image dimensions for diagram position estimation
+                h, w = processed_image.shape[:2]
+                
+                # Extract text with diagram detection
+                final_text, diagram_regions = qwen_ocr.extract_text_from_image(
+                    processed_image_path,
+                    image_width=w,
+                    image_height=h
+                )
+                
+                if final_text and final_text.strip():
+                    use_qwen_ocr = True
+                    logger.info(f"   ✅ Qwen-VL-OCR extracted {len(final_text)} characters")
+                    if diagram_regions:
+                        logger.info(f"   📊 Detected {len(diagram_regions)} diagram regions")
                 else:
-                    logger.info(f"   ⚠️  Smart Gemini OCR not available, using fallback...")
+                    # Qwen-VL-OCR returned empty but no error - create fallback
+                    logger.warning(f"   ⚠️  Qwen-VL-OCR extracted no text from image")
+                    final_text = ""
+                    
+            except RuntimeError as e:
+                # CRITICAL: Qwen-VL-OCR failure - HALT processing (no silent fallback)
+                logger.error(f"   ❌ OCR HALTED: {e}")
+                # Return structured error message instead of failing silently
+                return {
+                    'structured_json': [{
+                        'type': 'paragraph',
+                        'text': f'[OCR ERROR: {str(e)}]',
+                        'source': 'qwen_ocr_error'
+                    }],
+                    'diagram_dir': None,
+                    'image_index': image_index
+                }
             except Exception as e:
-                logger.warning(f"   ⚠️  Smart Gemini OCR failed: {e}, using fallback...")
-                final_text = ""
-        
-        # TRY 2: Traditional OCR (PaddleOCR/EasyOCR) as fallback
-        if not final_text or not final_text.strip():
-            logger.info(f"   📝 Using Traditional OCR (fallback method)...")
-            text_ocr = get_text_ocr()
-            try:
-                full_image_text, full_confidence = text_ocr.extract_text(processed_image, 'paragraph')
-                if full_image_text and full_image_text.strip():
-                    logger.info(f"   ✅ Traditional OCR extracted {len(full_image_text)} characters")
-                    final_text = full_image_text
-                else:
-                    logger.warning(f"   ⚠️  Traditional OCR also returned empty")
-            except Exception as e:
-                logger.warning(f"   ⚠️  Traditional OCR failed: {e}")
+                # CRITICAL: Unexpected error - HALT processing (no silent fallback)
+                logger.error(f"   ❌ Unexpected OCR error: {e}")
+                return {
+                    'structured_json': [{
+                        'type': 'paragraph',
+                        'text': f'[OCR ERROR: Unexpected failure - {str(e)}]',
+                        'source': 'qwen_ocr_error'
+                    }],
+                    'diagram_dir': None,
+                    'image_index': image_index
+                }
+        else:
+            # USE_QWEN_VL_OCR is False - this should not happen in production
+            logger.error(f"   ❌ CRITICAL: USE_QWEN_VL_OCR is disabled - no OCR engine available")
+            return {
+                'structured_json': [{
+                    'type': 'paragraph',
+                    'text': '[OCR ERROR: No OCR engine enabled]',
+                    'source': 'no_ocr_enabled'
+                }],
+                'diagram_dir': None,
+                'image_index': image_index
+            }
         
         # ============================================================
         # DOCUMENT STRUCTURE CREATION - Parse Extracted Text
@@ -323,9 +349,12 @@ async def process_single_image(
                 # Check for diagram placeholders
                 if line_stripped.startswith('[[DIAGRAM') and ']]' in line_stripped:
                     # This is a diagram placeholder - crop and add diagram
+                    logger.info(f"   🔍 Found diagram marker: {line_stripped}")
+                    
                     if diagram_idx < len(diagram_regions):
                         region = diagram_regions[diagram_idx]
                         bbox = region.get('estimated_bbox')
+                        logger.info(f"   📊 Processing diagram {diagram_idx}: bbox={bbox}")
                         
                         if bbox and bbox.get('x2') and bbox.get('y2'):
                             # Crop diagram region from original image
@@ -338,6 +367,8 @@ async def process_single_image(
                                 y1 = max(0, min(y1, h))
                                 y2 = max(0, min(y2, h))
                                 
+                                logger.info(f"   ✂️  Cropping diagram: x={x1}-{x2}, y={y1}-{y2} (Image: {w}x{h})")
+                                
                                 if x2 > x1 and y2 > y1:
                                     cropped_diagram = processed_image[y1:y2, x1:x2]
                                     diagram_filename = f"diagram_{image_index}_{diagram_idx}.png"
@@ -349,6 +380,12 @@ async def process_single_image(
                                         'image_path': str(diagram_path)
                                     })
                                     logger.info(f"   📸 Cropped diagram {diagram_idx} saved to {diagram_path}")
+                                else:
+                                    logger.warning(f"   ⚠️  Invalid crop dimensions: {x2-x1}x{y2-y1}")
+                                    structured_json.append({
+                                        'type': 'paragraph',
+                                        'text': '[Diagram - Invalid dimensions]'
+                                    })
                             except Exception as e:
                                 logger.warning(f"   ⚠️  Failed to crop diagram {diagram_idx}: {e}")
                                 structured_json.append({
@@ -357,10 +394,18 @@ async def process_single_image(
                                 })
                         else:
                             # No bbox available - just add placeholder
+                            logger.warning(f"   ⚠️  No bbox for diagram {diagram_idx}")
                             structured_json.append({
                                 'type': 'paragraph',
                                 'text': '[Diagram]'
                             })
+                    else:
+                        logger.warning(f"   ⚠️  Diagram marker found but no corresponding region (idx={diagram_idx}, regions={len(diagram_regions)})")
+                        structured_json.append({
+                            'type': 'paragraph',
+                            'text': '[Diagram]'
+                        })
+                        
                     diagram_idx += 1
                     continue
                 
@@ -386,7 +431,7 @@ async def process_single_image(
                     structured_json.append({
                         'type': 'paragraph',
                         'text': line_stripped,
-                        'source': 'gemini' if use_gemini else 'ocr'
+                        'source': 'qwen_ocr' if use_qwen_ocr else 'ocr'
                     })
             
             logger.info(f"   ✅ Created {len(structured_json)} elements from text")
@@ -400,14 +445,63 @@ async def process_single_image(
                 'text': '[OCR pipeline executed but no readable text was extracted]',
                 'source': 'mandatory_fallback'
             }]
+            
+        # ============================================================
+        # DIAGRAM FALLBACK: Check if specialized diagram extractor found diagrams that Qwen missed
+        # ============================================================
+        from app.services.diagram_extractor import diagram_extractor
+        
+        qwen_diagram_count = sum(1 for e in structured_json if e.get('type') == 'diagram')
+        
+        # Run dedicated diagram extraction
+        logger.info(f"   🎨 Running dedicated diagram extraction...")
+        detected_diagrams = diagram_extractor.extract_diagrams(str(processed_image_path))
+        
+        if qwen_diagram_count == 0 and detected_diagrams:
+            logger.info(f"   ⚠️  Qwen missed {len(detected_diagrams)} diagrams detected by dedicated extractor - inserting as fallback")
+            
+            for i, region in enumerate(detected_diagrams):
+                try:
+                    bbox = region.get('bbox') # [x1, y1, x2, y2]
+                    if bbox and len(bbox) == 4:
+                        x1, y1, x2, y2 = bbox
+                        h, w = processed_image.shape[:2]
+                        
+                        # Ensure bounds are valid
+                        x1 = max(0, min(x1, w))
+                        x2 = max(0, min(x2, w))
+                        y1 = max(0, min(y1, h))
+                        y2 = max(0, min(y2, h))
+                        
+                        if x2 > x1 and y2 > y1:
+                            cropped_diagram = processed_image[y1:y2, x1:x2]
+                            diagram_filename = f"diagram_extracted_{image_index}_{i}.png"
+                            diagram_path = outputs_dir / diagram_filename
+                            cv2.imwrite(str(diagram_path), cropped_diagram)
+                            
+                            # Calculate insertion position based on vertical location
+                            # This places the diagram roughly where it appears in the original image
+                            y_center = (y1 + y2) / 2
+                            relative_pos = y_center / h if h > 0 else 1.0
+                            insert_idx = int(relative_pos * len(structured_json))
+                            # Ensure index is within bounds
+                            insert_idx = max(0, min(insert_idx, len(structured_json)))
+                            
+                            diagram_element = {
+                                'type': 'diagram',
+                                'image_path': str(diagram_path)
+                            }
+                            
+                            structured_json.insert(insert_idx, diagram_element)
+                            logger.info(f"   📸 Fallback: Cropped diagram {i} saved to {diagram_path} (inserted at {insert_idx}/{len(structured_json)})")
+                except Exception as e:
+                    logger.warning(f"   ⚠️  Failed to crop fallback diagram {i}: {e}")
         
         # Build final document
         logger.info(f"   📄 Step 4/5: Building structured document...")
         try:
             # Use fused elements directly (already in correct format)
             logger.info(f"   ✅ Document structure ready with {len(structured_json)} elements")
-            
-            logger.info(f"   ✅ Document structure built with {len(structured_json)} elements")
             
             return {
                 'structured_json': structured_json,
