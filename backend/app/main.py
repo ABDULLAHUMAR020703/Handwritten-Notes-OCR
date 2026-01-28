@@ -102,13 +102,17 @@ app.include_router(download.router, prefix="/api", tags=["download"])
 @app.on_event("startup")
 async def startup_event():
     """Log server startup information."""
+    import os
+    port = os.getenv("PORT", "8000")
     logger.info("=" * 60)
     logger.info("🚀 Handwritten Notes OCR API Server Starting...")
     logger.info("=" * 60)
     logger.info(f"📅 Server started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("🌐 Server will be available at: http://0.0.0.0:8000")
-    logger.info("📚 API Documentation: http://0.0.0.0:8000/docs")
-    logger.info("💚 Health Check: http://0.0.0.0:8000/")
+    logger.info(f"🌐 Server will be available at: http://0.0.0.0:{port}")
+    logger.info(f"📚 API Documentation: http://0.0.0.0:{port}/docs")
+    logger.info(f"💚 Health Check: http://0.0.0.0:{port}/")
+    logger.info("=" * 60)
+    logger.info("⚠️  NOTE: ML models load lazily on first request to save memory")
     logger.info("=" * 60)
 
 @app.get("/")
